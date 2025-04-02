@@ -1,0 +1,829 @@
+import { useState } from "react";
+import { useAuth } from "@/hooks/use-auth";
+import { useToast } from "@/hooks/use-toast";
+import { useQuery } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { 
+  Dialog, 
+  DialogContent, 
+  DialogDescription, 
+  DialogFooter, 
+  DialogHeader, 
+  DialogTitle, 
+  DialogTrigger 
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { 
+  Table, 
+  TableBody, 
+  TableCaption, 
+  TableCell, 
+  TableHead, 
+  TableHeader, 
+  TableRow 
+} from "@/components/ui/table";
+import { 
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { 
+  Download, 
+  FileSpreadsheet, 
+  FolderPlus, 
+  Loader2, 
+  LogOut, 
+  MoreVertical, 
+  Plus, 
+  Share2, 
+  Trash, 
+  Upload, 
+  User,
+  FileText,
+  Presentation,
+  File as FileIcon,
+  Image as ImageIcon,
+  Video as VideoIcon,
+  Music as MusicIcon,
+  Folder,
+  FolderOpen,
+  FolderUp
+} from "lucide-react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { Link, useLocation } from "wouter";
+import { File as DriveFile, Spreadsheet } from "@shared/schema";
+import { formatDistanceToNow } from "date-fns";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UploadProgress } from "@/components/upload-progress";
+
+// Define schema for folder creation
+const createFolderSchema = z.object({
+  name: z.string().min(1, "Folder name is required"),
+});
+
+// Define schema for file upload
+const uploadFileSchema = z.object({
+  files: z.instanceof(FileList).refine(files => files.length > 0, "Please select at least one file"),
+});
+
+export default function HomePage() {
+  const { user, logoutMutation } = useAuth();
+  const { toast } = useToast();
+  const [createFolderOpen, setCreateFolderOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [location, navigate] = useLocation();
+  const [currentFolder, setCurrentFolder] = useState<number | null>(null);
+  const [uploadState, setUploadState] = useState({
+    isUploading: false,
+    progress: 0,
+    fileName: '',
+    totalFiles: 0,
+    currentFileIndex: 0
+  });
+
+  // Fetch files in the current folder
+  const { 
+    data: files, 
+    isLoading: filesLoading,
+    error: filesError
+  } = useQuery<DriveFile[]>({
+    queryKey: ["/api/files", currentFolder],
+    queryFn: async () => {
+      const url = currentFolder 
+        ? `/api/files?parentId=${currentFolder}` 
+        : '/api/files';
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to fetch files');
+      return res.json();
+    }
+  });
+
+  // Setup form for folder creation
+  const createFolderForm = useForm<z.infer<typeof createFolderSchema>>({
+    resolver: zodResolver(createFolderSchema),
+    defaultValues: {
+      name: "",
+    },
+  });
+
+  // Setup form for file upload
+  const uploadForm = useForm<z.infer<typeof uploadFileSchema>>({
+    resolver: zodResolver(uploadFileSchema),
+  });
+
+  // Handle folder creation
+  const onCreateFolder = async (data: z.infer<typeof createFolderSchema>) => {
+    try {
+      await apiRequest("POST", "/api/folders", {
+        name: data.name,
+        parentId: currentFolder,
+        mimeType: "folder"
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/files", currentFolder] });
+      setCreateFolderOpen(false);
+      createFolderForm.reset();
+    } catch (error) {
+      console.error("Failed to create folder:", error);
+    }
+  };
+
+  // Handle regular file upload
+  const onUploadFile = async (data: z.infer<typeof uploadFileSchema>) => {
+    if (!data.files || data.files.length === 0) return;
+    
+    const formData = new FormData();
+    
+    // Start upload progress tracking
+    setUploadState({
+      isUploading: true,
+      progress: 0,
+      fileName: data.files.length > 1 ? `Uploading ${data.files.length} files` : data.files[0].name,
+      totalFiles: data.files.length,
+      currentFileIndex: 0
+    });
+    
+    // Append all files to the formData
+    for (let i = 0; i < data.files.length; i++) {
+      formData.append("files", data.files[i]);
+    }
+    
+    if (currentFolder) {
+      formData.append("parentId", currentFolder.toString());
+    }
+
+    try {
+      // Use the faster multiple file upload endpoint with XHR to track progress
+      const xhr = new XMLHttpRequest();
+      
+      // Track upload progress
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = (event.loaded / event.total) * 100;
+          setUploadState(prev => ({
+            ...prev,
+            progress: percentComplete,
+            currentFileIndex: Math.floor((percentComplete / 100) * data.files.length)
+          }));
+        }
+      });
+      
+      // Create a promise to handle the XHR request
+      const uploadPromise = new Promise<void>((resolve, reject) => {
+        xhr.open('POST', '/api/files', true);
+        xhr.withCredentials = true;
+        
+        xhr.onload = function() {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error(`HTTP Error: ${xhr.status}`));
+          }
+        };
+        
+        xhr.onerror = function() {
+          reject(new Error('Network Error'));
+        };
+        
+        xhr.send(formData);
+      });
+      
+      await uploadPromise;
+      
+      // Reset upload state
+      setUploadState({
+        isUploading: false,
+        progress: 0,
+        fileName: '',
+        totalFiles: 0,
+        currentFileIndex: 0
+      });
+      
+      queryClient.invalidateQueries({ queryKey: ["/api/files", currentFolder] });
+      setUploadOpen(false);
+      uploadForm.reset();
+      
+      // Show a toast notification
+      toast({
+        title: `${data.files.length > 1 ? `${data.files.length} files` : "File"} uploaded successfully`,
+        description: "Your files are now available in MEETA DRIVE",
+      });
+    } catch (error) {
+      // Reset upload state
+      setUploadState({
+        isUploading: false,
+        progress: 0,
+        fileName: '',
+        totalFiles: 0,
+        currentFileIndex: 0
+      });
+      
+      console.error("Failed to upload files:", error);
+      toast({
+        title: "Upload failed",
+        description: "There was an error uploading your files. Please try again.",
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // Handle folder upload
+  // Handle multiple file selection with Ctrl+A
+  const handleCtrlAKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Check if Ctrl+A is pressed on the file input
+    if (e.ctrlKey && e.key === 'a') {
+      e.preventDefault();
+      
+      // Find all files in the current directory using the OS file picker
+      const fileInput = e.currentTarget as HTMLInputElement;
+      if (fileInput) {
+        // This will trigger a click on the file input, allowing selection of multiple files
+        fileInput.click();
+      }
+    }
+  };
+  
+  // Handle folder upload
+  const onUploadFolder = async (data: z.infer<typeof uploadFileSchema>) => {
+    if (!data.files || data.files.length === 0) return;
+    
+    // Extract folder name from the first file's path
+    // The first segment after splitting by '/' will be the folder name
+    const firstFile = data.files[0] as File & { webkitRelativePath?: string };
+    const folderPath = firstFile.webkitRelativePath || '';
+    const folderName = folderPath.split('/')[0];
+    
+    if (!folderName) {
+      toast({
+        title: "Invalid folder structure",
+        description: "Could not determine folder name",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    // Start upload progress tracking
+    setUploadState({
+      isUploading: true,
+      progress: 0,
+      fileName: folderName,
+      totalFiles: data.files.length,
+      currentFileIndex: 0
+    });
+    
+    const formData = new FormData();
+    
+    // Append all files to the formData
+    for (let i = 0; i < data.files.length; i++) {
+      formData.append("files", data.files[i]);
+    }
+    
+    // Add folder name and paths info
+    formData.append("folderName", folderName);
+    
+    // Add path information for each file
+    const paths: string[] = [];
+    for (let i = 0; i < data.files.length; i++) {
+      const file = data.files[i] as File & { webkitRelativePath?: string };
+      if (file.webkitRelativePath) {
+        paths.push(file.webkitRelativePath);
+      }
+    }
+    formData.append("paths", JSON.stringify(paths));
+    
+    if (currentFolder) {
+      formData.append("parentId", currentFolder.toString());
+    }
+    
+    try {
+      // Use the fast folder upload endpoint with XHR to track progress
+      const xhr = new XMLHttpRequest();
+      
+      // Track upload progress
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = (event.loaded / event.total) * 100;
+          setUploadState(prev => ({
+            ...prev,
+            progress: percentComplete,
+            fileName: `${folderName} (${Math.round(percentComplete)}%)`,
+            currentFileIndex: Math.floor((percentComplete / 100) * data.files.length)
+          }));
+        }
+      });
+      
+      // Create a promise to handle the XHR request
+      const uploadPromise = new Promise<void>((resolve, reject) => {
+        xhr.open('POST', '/api/folders/upload-fast', true);
+        xhr.withCredentials = true;
+        
+        xhr.onload = function() {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error(`HTTP Error: ${xhr.status}`));
+          }
+        };
+        
+        xhr.onerror = function() {
+          reject(new Error('Network Error'));
+        };
+        
+        xhr.send(formData);
+      });
+      
+      // Show upload in progress toast
+      toast({
+        title: "Uploading folder...",
+        description: `Uploading ${folderName} with ${data.files.length} files`,
+      });
+      
+      await uploadPromise;
+      
+      // Reset upload state
+      setUploadState({
+        isUploading: false,
+        progress: 0,
+        fileName: '',
+        totalFiles: 0,
+        currentFileIndex: 0
+      });
+      
+      queryClient.invalidateQueries({ queryKey: ["/api/files", currentFolder] });
+      setUploadOpen(false);
+      uploadForm.reset();
+      
+      // Show success toast
+      toast({
+        title: "Folder uploaded successfully",
+        description: `${folderName} with ${data.files.length} files is now available in MEETA DRIVE`,
+      });
+    } catch (error) {
+      // Reset upload state
+      setUploadState({
+        isUploading: false,
+        progress: 0,
+        fileName: '',
+        totalFiles: 0,
+        currentFileIndex: 0
+      });
+      
+      console.error("Failed to upload folder:", error);
+      toast({
+        title: "Folder upload failed",
+        description: "There was an error uploading your folder. Please try again.",
+        variant: "destructive"
+      });
+    }
+  };
+
+  // Handle file operations
+  const handleFileAction = async (file: DriveFile, action: 'open' | 'download' | 'delete' | 'share') => {
+    switch (action) {
+      case 'open':
+        if (file.isFolder) {
+          setCurrentFolder(file.id);
+        } else if (file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                  file.type === 'text/csv' ||
+                  file.name.endsWith('.xlsx') ||
+                  file.name.endsWith('.csv')) {
+          navigate(`/spreadsheet/${file.id}`);
+        } else if (file.type === 'application/pdf' ||
+                  file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+                  file.name.endsWith('.pdf') ||
+                  file.name.endsWith('.docx') ||
+                  file.name.endsWith('.doc')) {
+          navigate(`/document/${file.id}`);
+        } else if (file.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+                  file.name.endsWith('.pptx') ||
+                  file.name.endsWith('.ppt')) {
+          navigate(`/presentation/${file.id}`);
+        }
+        break;
+      case 'download':
+        window.open(`/api/files/${file.id}/download`, '_blank');
+        break;
+      case 'delete':
+        if (confirm(`Are you sure you want to delete "${file.name}"?`)) {
+          await apiRequest("DELETE", `/api/files/${file.id}`);
+          queryClient.invalidateQueries({ queryKey: ["/api/files", currentFolder] });
+        }
+        break;
+      case 'share':
+        // Future implementation for sharing UI
+        alert('Sharing functionality will be implemented soon!');
+        break;
+    }
+  };
+
+  // Handle navigation to parent folder
+  const navigateUp = () => {
+    if (currentFolder) {
+      // Get the parent folder and navigate to it, or to root if no parent
+      const currentFile = files?.find(f => f.id === currentFolder);
+      setCurrentFolder(currentFile?.parentId || null);
+    }
+  };
+
+  if (!user) return null;
+
+  // Helper to format bytes to human-readable format
+  const formatFileSize = (bytes: number | null) => {
+    if (bytes === null) return 'N/A';
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    if (bytes === 0) return '0 Bytes';
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return parseFloat((bytes / Math.pow(1024, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // Get current path for breadcrumb
+  const getBreadcrumb = () => {
+    if (!currentFolder) return 'My Files';
+    const currentFile = files?.find(f => f.id === currentFolder);
+    return currentFile?.name || 'Loading...';
+  };
+
+  return (
+    <div className="min-h-screen bg-background flex flex-col">
+      {/* Navigation Bar */}
+      <header className="border-b">
+        <div className="container mx-auto px-4 py-3 flex justify-between items-center">
+          <div className="flex items-center space-x-2">
+            <FileSpreadsheet className="h-6 w-6 text-primary" />
+            <h1 className="text-xl font-bold">MEETA DRIVE</h1>
+          </div>
+          
+          <div className="flex items-center space-x-4">
+            <div className="text-sm">
+              {user && (
+                <div className="flex items-center space-x-2">
+                  <User className="h-4 w-4" />
+                  <span>{user.username}</span>
+                </div>
+              )}
+            </div>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={() => logoutMutation.mutate()}
+              disabled={logoutMutation.isPending}
+            >
+              {logoutMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <>
+                  <LogOut className="h-4 w-4 mr-2" />
+                  Logout
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-1 container mx-auto px-4 py-6">
+        {/* Breadcrumb and Actions */}
+        <div className="flex justify-between items-center mb-6">
+          <div className="flex items-center space-x-2">
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={navigateUp}
+              disabled={!currentFolder}
+            >
+              {currentFolder ? '← Back' : 'My Files'}
+            </Button>
+            {currentFolder && (
+              <div className="text-sm text-muted-foreground">
+                / {getBreadcrumb()}
+              </div>
+            )}
+          </div>
+          
+          <div className="flex space-x-2">
+            <Dialog open={createFolderOpen} onOpenChange={setCreateFolderOpen}>
+              <DialogTrigger asChild>
+                <Button size="sm" variant="outline">
+                  <FolderPlus className="h-4 w-4 mr-2" />
+                  New Folder
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Create New Folder</DialogTitle>
+                  <DialogDescription>
+                    Enter a name for your new folder.
+                  </DialogDescription>
+                </DialogHeader>
+                <Form {...createFolderForm}>
+                  <form onSubmit={createFolderForm.handleSubmit(onCreateFolder)} className="space-y-4">
+                    <FormField
+                      control={createFolderForm.control}
+                      name="name"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Folder Name</FormLabel>
+                          <FormControl>
+                            <Input placeholder="My Folder" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <DialogFooter>
+                      <Button type="submit">Create Folder</Button>
+                    </DialogFooter>
+                  </form>
+                </Form>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
+              <DialogTrigger asChild>
+                <Button size="sm">
+                  <Upload className="h-4 w-4 mr-2" />
+                  Upload Files
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-[500px]">
+                <DialogHeader>
+                  <DialogTitle>Upload to MEETA DRIVE</DialogTitle>
+                  <DialogDescription>
+                    Add files or folders to your cloud storage.
+                  </DialogDescription>
+                </DialogHeader>
+                
+                <Tabs defaultValue="files" className="mt-4">
+                  <TabsList className="grid grid-cols-2">
+                    <TabsTrigger value="files">Files Upload</TabsTrigger>
+                    <TabsTrigger value="folders">Folder Upload</TabsTrigger>
+                  </TabsList>
+                  
+                  {/* Files Upload Tab */}
+                  <TabsContent value="files">
+                    <Form {...uploadForm}>
+                      <form onSubmit={uploadForm.handleSubmit(onUploadFile)} className="space-y-4">
+                        <FormField
+                          control={uploadForm.control}
+                          name="files"
+                          render={({ field: { onChange, value, ...fieldProps } }) => (
+                            <FormItem>
+                              <FormLabel>Select Files</FormLabel>
+                              <FormControl>
+                                <Input 
+                                  type="file" 
+                                  multiple
+                                  onChange={(e) => onChange(e.target.files)}
+                                  onKeyDown={handleCtrlAKeyDown}
+                                  className="cursor-pointer"
+                                  {...fieldProps}
+                                />
+                              </FormControl>
+                              <FormDescription>
+                                Use Ctrl+A to select all files or Ctrl+Click for multiple files
+                              </FormDescription>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                        <DialogFooter>
+                          <Button type="submit">Upload Files</Button>
+                        </DialogFooter>
+                      </form>
+                    </Form>
+                  </TabsContent>
+                  
+                  {/* Folder Upload Tab */}
+                  <TabsContent value="folders">
+                    <Form {...uploadForm}>
+                      <form onSubmit={uploadForm.handleSubmit(onUploadFolder)} className="space-y-4">
+                        <FormField
+                          control={uploadForm.control}
+                          name="files"
+                          render={({ field: { onChange, value, ...fieldProps } }) => (
+                            <FormItem>
+                              <FormLabel>Select Folder</FormLabel>
+                              <FormControl>
+                                <input 
+                                  type="file" 
+                                  // @ts-ignore - webkitdirectory is a non-standard attribute
+                                  webkitdirectory="true"
+                                  // @ts-ignore - directory is a non-standard attribute
+                                  directory="true"
+                                  multiple
+                                  onChange={(e) => onChange(e.target.files)}
+                                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:border-0 file:bg-transparent file:text-sm file:font-medium cursor-pointer"
+                                  {...fieldProps}
+                                />
+                              </FormControl>
+                              <FormDescription>
+                                Select an entire folder to upload with all its contents
+                              </FormDescription>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                        <DialogFooter>
+                          <Button type="submit">Upload Folder</Button>
+                        </DialogFooter>
+                      </form>
+                    </Form>
+                  </TabsContent>
+                </Tabs>
+              </DialogContent>
+            </Dialog>
+          </div>
+        </div>
+
+        {/* Files and Folders List */}
+        <Card>
+          <CardHeader>
+            <CardTitle>
+              {currentFolder ? getBreadcrumb() : 'My Files'}
+            </CardTitle>
+            <CardDescription>
+              {user && <span>Storage Used: {formatFileSize(user.storageUsed || 0)} / {formatFileSize(user.storageLimit || 1024 * 1024 * 1024 * 5)}</span>}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {filesLoading ? (
+              <div className="flex justify-center items-center p-10">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              </div>
+            ) : filesError ? (
+              <div className="text-center text-destructive p-6">
+                Failed to load files. Please try again.
+              </div>
+            ) : files && files.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[40%]">Name</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Size</TableHead>
+                    <TableHead>Last Modified</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {files.map((file) => (
+                    <TableRow key={file.id}>
+                      <TableCell 
+                        className="font-medium cursor-pointer hover:underline"
+                        onClick={() => handleFileAction(file, 'open')}
+                      >
+                        <div className="flex items-center space-x-2">
+                          {file.isFolder ? (
+                            <Folder className="h-5 w-5 text-blue-500" />
+                          ) : file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                             file.type === 'text/csv' ||
+                             file.name.endsWith('.xlsx') ||
+                             file.name.endsWith('.csv') ? (
+                            <FileSpreadsheet className="h-5 w-5 text-green-500" />
+                          ) : file.type === 'application/pdf' ||
+                             file.name.endsWith('.pdf') ||
+                             file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+                             file.name.endsWith('.docx') ||
+                             file.name.endsWith('.doc') ? (
+                            <FileText className="h-5 w-5 text-orange-500" />
+                          ) : file.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+                             file.name.endsWith('.pptx') ||
+                             file.name.endsWith('.ppt') ? (
+                            <Presentation className="h-5 w-5 text-red-500" />
+                          ) : file.type?.startsWith('image/') ||
+                             ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'].some(ext => file.name.toLowerCase().endsWith(ext)) ? (
+                            <ImageIcon className="h-5 w-5 text-purple-500" />
+                          ) : file.type?.startsWith('video/') ||
+                             ['.mp4', '.webm', '.avi', '.mov', '.wmv'].some(ext => file.name.toLowerCase().endsWith(ext)) ? (
+                            <VideoIcon className="h-5 w-5 text-pink-500" />
+                          ) : file.type?.startsWith('audio/') ||
+                             ['.mp3', '.wav', '.ogg', '.flac'].some(ext => file.name.toLowerCase().endsWith(ext)) ? (
+                            <MusicIcon className="h-5 w-5 text-indigo-500" />
+                          ) : (
+                            <FileIcon className="h-5 w-5 text-gray-500" />
+                          )}
+                          <span>{file.name}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {file.isFolder 
+                          ? 'Folder' 
+                          : file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                            file.name.endsWith('.xlsx')
+                            ? 'Excel Spreadsheet'
+                            : file.type === 'text/csv' ||
+                              file.name.endsWith('.csv')
+                              ? 'CSV File'
+                            : file.type === 'application/pdf' ||
+                              file.name.endsWith('.pdf')
+                              ? 'PDF Document'
+                            : file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+                              file.name.endsWith('.docx') ||
+                              file.name.endsWith('.doc')
+                              ? 'Word Document'
+                            : file.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+                              file.name.endsWith('.pptx') ||
+                              file.name.endsWith('.ppt')
+                              ? 'PowerPoint Presentation'
+                            : file.type?.startsWith('image/') ||
+                              ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'].some(ext => file.name.toLowerCase().endsWith(ext))
+                              ? 'Image'
+                            : file.type?.startsWith('video/') ||
+                              ['.mp4', '.webm', '.avi', '.mov', '.wmv'].some(ext => file.name.toLowerCase().endsWith(ext))
+                              ? 'Video'
+                            : file.type?.startsWith('audio/') ||
+                              ['.mp3', '.wav', '.ogg', '.flac'].some(ext => file.name.toLowerCase().endsWith(ext))
+                              ? 'Audio'
+                            : 'File'
+                        }
+                      </TableCell>
+                      <TableCell>
+                        {file.isFolder ? '-' : formatFileSize(file.size || 0)}
+                      </TableCell>
+                      <TableCell>
+                        {file.updatedAt 
+                          ? formatDistanceToNow(new Date(file.updatedAt), { addSuffix: true }) 
+                          : 'N/A'}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon">
+                              <MoreVertical className="h-4 w-4" />
+                              <span className="sr-only">Actions</span>
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                            <DropdownMenuItem onClick={() => handleFileAction(file, 'open')}>
+                              {file.isFolder ? 'Open Folder' : 'Open File'}
+                            </DropdownMenuItem>
+                            {!file.isFolder && (
+                              <DropdownMenuItem onClick={() => handleFileAction(file, 'download')}>
+                                Download
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem onClick={() => handleFileAction(file, 'share')}>
+                              Share
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem 
+                              className="text-destructive focus:text-destructive"
+                              onClick={() => handleFileAction(file, 'delete')}
+                            >
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <div className="text-center p-10 border rounded-md bg-muted/30">
+                <div className="flex flex-col items-center justify-center space-y-3">
+                  <FolderPlus className="h-12 w-12 text-muted-foreground" />
+                  <p className="text-muted-foreground text-sm">No files or folders found.</p>
+                  <div className="flex space-x-2">
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={() => setCreateFolderOpen(true)}
+                    >
+                      <FolderPlus className="h-4 w-4 mr-2" />
+                      Create Folder
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      onClick={() => setUploadOpen(true)}
+                    >
+                      <Upload className="h-4 w-4 mr-2" />
+                      Upload Files
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t py-4">
+        <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">
+          <p>© {new Date().getFullYear()} MEETA DRIVE. All rights reserved.</p>
+        </div>
+      </footer>
+    </div>
+  );
+}
